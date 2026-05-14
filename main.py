@@ -108,7 +108,7 @@ async def run():
     cap_kospi  = stock.get_market_cap_by_ticker(date, market="KOSPI")
     cap_kosdaq = stock.get_market_cap_by_ticker(date, market="KOSDAQ")
     cap_all    = pd.concat([cap_kospi, cap_kosdaq])
-    cap_all    = cap_all[cap_all['시가총액'] >= 100_000_000_000]
+    cap_all    = cap_all[cap_all['시가총액'] >= 300_000_000_000]
     tickers    = cap_all.index.tolist()
     print(f"대상 종목: {len(tickers)}개")
 
