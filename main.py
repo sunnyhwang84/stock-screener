@@ -11,7 +11,7 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
 
 def get_recent_trading_day():
-    d = datetime.now()
+    d = datetime.now()- timedelta(days=1)
     for _ in range(7):
         if d.weekday() < 5:
             return d.strftime("%Y%m%d")
