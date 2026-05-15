@@ -169,20 +169,5 @@ async def run():
     await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='Markdown')
     print("✅ 완료")
 
-import schedule
-import time
-
-def run_sync():
+if __name__ == "__main__":
     asyncio.run(run())
-
-# 매일 KST 9:35 (UTC 0:35)
-schedule.every().monday.at("00:35").do(run_sync)
-schedule.every().tuesday.at("00:35").do(run_sync)
-schedule.every().wednesday.at("00:35").do(run_sync)
-schedule.every().thursday.at("00:35").do(run_sync)
-schedule.every().friday.at("00:35").do(run_sync)
-
-print("스케줄러 시작. 다음 실행 대기 중...")
-while True:
-    schedule.run_pending()
-    time.sleep(60)
