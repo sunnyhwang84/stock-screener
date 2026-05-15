@@ -1,5 +1,6 @@
-pykrx
+FinanceDataReader
+yfinance
 pandas
+numpy
 python-telegram-bot==20.7
 anthropic
-schedule
