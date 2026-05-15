@@ -2,165 +2,195 @@ import os
 import asyncio
 from datetime import datetime, timedelta
 import pandas as pd
-from pykrx import stock
-from telegram import Bot
+import numpy as np
+import FinanceDataReader as fdr
+import yfinance as yf
 import anthropic
+from telegram import Bot
 
-TELEGRAM_TOKEN   = os.environ["TELEGRAM_TOKEN"]
+TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
-def get_recent_trading_day():
-    d = datetime.now()- timedelta(days=1)
+
+def get_prev_trading_day():
+    d = datetime.now() - timedelta(days=1)
     for _ in range(7):
         if d.weekday() < 5:
-            return d.strftime("%Y%m%d")
+            return d.strftime('%Y-%m-%d')
         d -= timedelta(days=1)
 
-def get_ohlcv(ticker, days=130):
-    end   = get_recent_trading_day()
-    start = (datetime.now() - timedelta(days=days)).strftime("%Y%m%d")
-    try:
-        df = stock.get_market_ohlcv_by_date(start, end, ticker)
-        if len(df) < 65:
-            return None
-        df.columns = ['open','high','low','close','volume','amount','changes']
-        return df
-    except:
-        return None
-
-def rsi(series, period=14):
-    delta = series.diff()
-    gain  = delta.clip(lower=0).rolling(period).mean()
-    loss  = (-delta.clip(upper=0)).rolling(period).mean()
-    rs    = gain / loss
-    return 100 - (100 / (1 + rs))
-
-def score_ticker(df):
-    df = df.copy()
-    df['RSI']      = rsi(df['close'])
-    df['MA5']      = df['close'].rolling(5).mean()
-    df['MA20']     = df['close'].rolling(20).mean()
-    df['MA60']     = df['close'].rolling(60).mean()
-    df['vol_ma5']  = df['volume'].rolling(5).mean()
-    df['vol_ma20'] = df['volume'].rolling(20).mean()
-    df['high_52w'] = df['high'].rolling(252).max()
-
-    cur  = df.iloc[-1]
-    prev = df.iloc[-2]
-
-    score   = 0
-    signals = []
-
-    if 30 <= cur['RSI'] <= 40:
-        score += 1; signals.append("RSI반등")
-    if prev['close'] < prev['MA5'] and cur['close'] > cur['MA5']:
-        score += 1; signals.append("5일선돌파")
-    if cur['MA20'] > cur['MA60']:
-        score += 1; signals.append("정배열")
-    if cur['high_52w'] > 0 and cur['close'] / cur['high_52w'] >= 0.95:
-        score += 1; signals.append(f"52주고점{cur['close']/cur['high_52w']*100:.0f}%")
-    if cur['vol_ma5'] > cur['vol_ma20'] * 2:
-        score += 1; signals.append("거래량폭발")
-    if cur['close'] > cur['open']:
-        score += 1; signals.append("양봉")
-
-    return score, signals, df
-
-def is_danta(df, market_cap):
-    cur      = df.iloc[-1]
-    prev_avg = df['amount'].rolling(20).mean().iloc[-2]
-    if prev_avg == 0:
-        return False, 0
-    ratio = cur['amount'] / prev_avg
-    ok = ratio >= 5 and cur['close'] > cur['open'] and market_cap >= 100_000_000_000
-    return ok, ratio
 
 def is_bull():
-    end   = get_recent_trading_day()
-    start = (datetime.now() - timedelta(days=10)).strftime("%Y%m%d")
     try:
-        k = stock.get_index_ohlcv_by_date(start, end, "1001")
-        r = k.iloc[-1]
-        return r['종가'] > r['시가']
-    except:
+        end = datetime.now().strftime('%Y-%m-%d')
+        start = (datetime.now() - timedelta(days=60)).strftime('%Y-%m-%d')
+        df = fdr.DataReader('KS11', start, end)
+        if len(df) < 20:
+            return True
+        ma20 = df['Close'].rolling(20).mean().iloc[-1]
+        return bool(df['Close'].iloc[-1] > ma20)
+    except Exception as e:
+        print(f"is_bull 오류: {e}")
         return True
 
-def claude_summary(name):
-    try:
-        c = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        r = c.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=120,
-            messages=[{"role":"user","content":
-                f"한국 주식 {name}의 최근 투자 포인트를 1문장으로만 요약해줘. 모르면 '-'라고만 해."}]
-        )
-        return r.content[0].text.strip()
-    except:
-        return "-"
+
+def calc_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / (loss + 1e-10)
+    return 100 - (100 / (1 + rs))
+
 
 async def run():
-    today = datetime.now().strftime("%Y-%m-%d")
-    date  = get_recent_trading_day()
-    bull  = is_bull()
+    today = datetime.now().strftime('%Y-%m-%d')
+    bull = is_bull()
     print(f"[{today}] 스크리닝 시작 | {'강세장' if bull else '약세장'}")
 
-    cap_kospi  = stock.get_market_cap_by_ticker(date, market="KOSPI")
-    cap_kosdaq = stock.get_market_cap_by_ticker(date, market="KOSDAQ")
-    cap_all    = pd.concat([cap_kospi, cap_kosdaq])
-    cap_all    = cap_all[cap_all['시가총액'] >= 300_000_000_000]
-    tickers    = cap_all.index.tolist()
-    print(f"대상 종목: {len(tickers)}개")
+    try:
+        df_kospi = fdr.StockListing('KOSPI')
+        df_kosdaq = fdr.StockListing('KOSDAQ')
+    except Exception as e:
+        print(f"StockListing 오류: {e}")
+        return
 
-    momentum, danta = [], []
+    df_kospi = df_kospi[df_kospi['Marcap'] >= 300_000_000_000]
+    df_kosdaq = df_kosdaq[df_kosdaq['Marcap'] >= 300_000_000_000]
 
-    for i, ticker in enumerate(tickers):
-        if i % 200 == 0: print(f"{i}/{len(tickers)}")
-        df = get_ohlcv(ticker)
-        if df is None: continue
+    kospi_codes = df_kospi['Code'].tolist()
+    kosdaq_codes = df_kosdaq['Code'].tolist()
+    all_codes = kospi_codes + kosdaq_codes
+    yf_tickers = [f"{c}.KS" for c in kospi_codes] + [f"{c}.KQ" for c in kosdaq_codes]
+    code_to_yf = dict(zip(all_codes, yf_tickers))
+
+    name_map = {}
+    for _, row in pd.concat([df_kospi, df_kosdaq]).iterrows():
+        name_map[row['Code']] = row['Name']
+
+    print(f"대상 종목: {len(all_codes)}개")
+
+    start_dt = (datetime.now() - timedelta(days=200)).strftime('%Y-%m-%d')
+    print("OHLCV 다운로드 중...")
+
+    try:
+        raw = yf.download(
+            yf_tickers,
+            start=start_dt,
+            end=today,
+            auto_adjust=True,
+            progress=False,
+            threads=True,
+        )
+    except Exception as e:
+        print(f"yfinance 오류: {e}")
+        return
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        close_all = raw['Close']
+        volume_all = raw['Volume']
+        open_all = raw['Open']
+    else:
+        close_all = raw[['Close']].rename(columns={'Close': yf_tickers[0]})
+        volume_all = raw[['Volume']].rename(columns={'Volume': yf_tickers[0]})
+        open_all = raw[['Open']].rename(columns={'Open': yf_tickers[0]})
+
+    momentum = []
+    top_d = []
+
+    for code in all_codes:
+        yf_t = code_to_yf[code]
         try:
-            sc, sigs, df2 = score_ticker(df)
-            cap  = cap_all.loc[ticker, '시가총액']
-            name = stock.get_market_ticker_name(ticker)
-            cur  = df2.iloc[-1]
+            if yf_t not in close_all.columns:
+                continue
+            close = close_all[yf_t].dropna()
+            volume = volume_all[yf_t].dropna()
+            open_ = open_all[yf_t].dropna()
+            if len(close) < 60:
+                continue
 
-            if sc >= 3:
-                vol_r   = cur['vol_ma5'] / cur['vol_ma20'] if cur['vol_ma20'] > 0 else 0
-                pct_52w = cur['close'] / cur['high_52w'] * 100 if cur['high_52w'] > 0 else 0
-                momentum.append(dict(ticker=ticker, name=name, score=sc,
-                    price=cur['close'], rsi=cur['RSI'],
-                    vol_r=vol_r, pct_52w=pct_52w, signals=sigs))
+            rsi = calc_rsi(close)
+            ma5 = close.rolling(5).mean()
+            ma20 = close.rolling(20).mean()
+            ma60 = close.rolling(60).mean()
 
-            if bull:
-                ok, ratio = is_danta(df2, cap)
-                if ok:
-                    danta.append(dict(ticker=ticker, name=name,
-                        price=cur['close'], ratio=ratio,
-                        amount=cur['amount']/100_000_000))
+            curr = close.iloc[-1]
+            curr_rsi = rsi.iloc[-1]
+            curr_ma5 = ma5.iloc[-1]
+            curr_ma20 = ma20.iloc[-1]
+            curr_ma60 = ma60.iloc[-1]
+            curr_vol = volume.iloc[-1]
+            curr_open = open_.iloc[-1]
+
+            high_52w = close.iloc[-252:].max() if len(close) >= 252 else close.max()
+            vol_ma20 = volume.rolling(20).mean().iloc[-1]
+            vol_ratio = curr_vol / (vol_ma20 + 1)
+            is_bullish = curr > curr_open
+            amount = (curr * curr_vol) / 1e8
+
+            score = 0
+            if 30 < curr_rsi < 70: score += 1
+            if curr > curr_ma5: score += 1
+            if curr_ma5 > curr_ma20 > curr_ma60: score += 1
+            if curr >= high_52w * 0.95: score += 1
+            if vol_ratio >= 2: score += 1
+            if is_bullish: score += 1
+
+            r = {
+                'name': name_map.get(code, code),
+                'ticker': code,
+                'price': int(curr),
+                'rsi': round(float(curr_rsi), 1),
+                'score': score,
+                'vol_ratio': round(float(vol_ratio), 1),
+                'amount': round(float(amount), 0),
+                'ratio': round(float((curr - curr_ma20) / curr_ma20 * 100), 1),
+                'is_bullish': is_bullish,
+            }
+
+            if score >= 4:
+                momentum.append(r)
+            if vol_ratio >= 5 and is_bullish:
+                top_d.append(r)
         except:
             continue
 
     momentum.sort(key=lambda x: x['score'], reverse=True)
-    danta.sort(key=lambda x: x['ratio'], reverse=True)
-    top5  = momentum[:5]
-    top_d = danta[:3]
+    top_d.sort(key=lambda x: x['vol_ratio'], reverse=True)
+    print(f"모멘텀 {len(momentum)}개 / 단타 {len(top_d)}개")
 
-    msg = f"🔍 *오늘의 스크리닝* ({today})\n"
-    msg += f"시장: {'📈 강세장' if bull else '📉 약세장'}\n\n"
+    summary = ""
+    if ANTHROPIC_API_KEY and momentum:
+        try:
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            ticker_list = ', '.join([f"{r['name']}({r['ticker']})" for r in momentum[:10]])
+            resp = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=200,
+                messages=[{"role": "user", "content": f"오늘 스크리닝 종목: {ticker_list}. 공통 테마나 특징 2줄 요약. 반말로."}]
+            )
+            summary = resp.content[0].text
+        except Exception as e:
+            print(f"Claude 요약 오류: {e}")
 
-    for i, r in enumerate(top5, 1):
-        summary = claude_summary(r['name'])
-        msg += f"{i}. *{r['name']} ({r['ticker']})* | {r['score']*10}점\n"
-        msg += f"   {r['price']:,.0f}원 | RSI {r['rsi']:.1f} | 거래량 {r['vol_r']:.1f}x | 52w {r['pct_52w']:.1f}%\n"
-        msg += f"   시그널: {', '.join(r['signals'])}\n"
-        msg += f"   💬 {summary}\n\n"
+    msg = f"📊 *{today} 주식 스크리닝* | {'🐂 강세장' if bull else '🐻 약세장'}\n\n"
+
+    if momentum:
+        msg += f"🚀 *모멘텀 종목 (4점+)* — {len(momentum)}개\n"
+        for r in momentum[:10]:
+            msg += f"• *{r['name']}* ({r['ticker']}) | {r['price']:,}원 | RSI {r['rsi']} | {r['score']}점\n"
+            msg += f"  거래량 {r['vol_ratio']}배 | {r['amount']:.0f}억 | MA20 대비 {r['ratio']:+.1f}%\n"
+    else:
+        msg += "모멘텀 종목 없음\n"
+
+    if summary:
+        msg += f"\n💬 *AI 요약*\n{summary}\n"
 
     if top_d and bull:
-        msg += "━━━━━━━━━━━━━━━━━\n"
-        msg += "⚡ *단타 신호 (거래대금 폭발)*\n\n"
-        for r in top_d:
-            msg += f"• *{r['name']} ({r['ticker']})* | {r['ratio']:.1f}배 | {r['amount']:.0f}억\n"
-            msg += f"  {r['price']:,.0f}원 | 손절 -2% | 익절 +3%\n\n"
+        msg += f"\n⚡ *단타 신호 (거래대금 폭발)* — {len(top_d)}개\n"
+        for r in top_d[:5]:
+            msg += f"• *{r['name']}* ({r['ticker']}) | {r['price']:,}원 | {r['vol_ratio']}배 | {r['amount']:.0f}억\n"
+            msg += f"  손절 -2% | 익절 +3%\n"
         msg += "⚠️ 익일 시초 -3%+ 갭하락 시 진입 보류.\n"
 
     msg += "\n⚠️ 후보 발굴이지 매수 추천 아님. 본인 판단 필수."
@@ -168,6 +198,7 @@ async def run():
     bot = Bot(token=TELEGRAM_TOKEN)
     await bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='Markdown')
     print("✅ 완료")
+
 
 if __name__ == "__main__":
     asyncio.run(run())
