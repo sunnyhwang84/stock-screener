@@ -1,8 +1,6 @@
 name: Stock Screener
 
 on:
-  schedule:
-    - cron: '35 0 * * 1-5'
   workflow_dispatch:
 
 jobs:
